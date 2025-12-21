@@ -1,0 +1,13 @@
+# Signing keys (sensitive)
+sa-signer.key
+sa-signer.pub
+
+# Backup files
+backup-*.yaml
+
+# Generated OIDC/JWKS files
+openid-configuration.json
+jwks.json
+
+# Environment files
+.oidc-env

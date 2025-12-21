@@ -1,0 +1,375 @@
+version: '3'
+
+silent: true
+
+vars:
+  RESOURCE_GROUP: "homelab"
+  LOCATION: "eastus"
+  AZURE_STORAGE_ACCOUNT: "oidcissuer2aa6a2e6"
+  AZURE_STORAGE_REGION: "z13"
+  AZURE_STORAGE_CONTAINER: "$web"
+  PUBLIC_KEY_PATH: "sa-signer.pub"
+  ISSUER_URL: "https://{{.AZURE_STORAGE_ACCOUNT}}.{{.AZURE_STORAGE_REGION}}.web.core.windows.net"
+
+tasks:
+  # ===================
+  # Backup Tasks
+  # ===================
+  backup-signing-key:
+    desc: Backup the bound-service-account-signing-key secret from openshift-kube-apiserver namespace
+    cmds:
+      - oc get secret bound-service-account-signing-key -n openshift-kube-apiserver -o yaml > backup-signing-key.yaml
+    generates:
+      - backup-signing-key.yaml
+
+  backup-extract-keys:
+    desc: Extract public and private signing keys from the cluster and save to files
+    cmds:
+      - |
+        echo "Extracting signing keys from bound-service-account-signing-key secret..."
+        oc get secret bound-service-account-signing-key -n openshift-kube-apiserver -o jsonpath='{.data.service-account\.key}' | base64 -d > sa-signer.key
+        echo "Private key saved to sa-signer.key"
+        oc get secret bound-service-account-signing-key -n openshift-kube-apiserver -o jsonpath='{.data.service-account\.pub}' | base64 -d > sa-signer.pub
+        echo "Public key saved to sa-signer.pub"
+        echo "Keys extracted successfully. Use PUBLIC_KEY_PATH=sa-signer.pub for jwks-generate task"
+    generates:
+      - sa-signer.key
+      - sa-signer.pub
+
+  backup-apiserver:
+    desc: Backup the API server resource to YAML
+    cmds:
+      - oc get kubeapiserver cluster -o yaml > backup-apiserver.yaml
+    generates:
+      - backup-apiserver.yaml
+
+  backup-controller:
+    desc: Backup the controller manager resource to YAML
+    cmds:
+      - oc get kubecontrollermanager cluster -o yaml > backup-controller.yaml
+    generates:
+      - backup-controller.yaml
+
+  backup-authentication:
+    desc: Backup the authentication server resource to YAML
+    cmds:
+      - oc get authentication cluster -o yaml > backup-authentication.yaml
+    generates:
+      - backup-authentication.yaml
+
+  backup-all:
+    desc: Backup all resources (signing key, apiserver, controller, authentication)
+    cmds:
+      - task: backup-signing-key
+      - task: backup-apiserver
+      - task: backup-controller
+      - task: backup-authentication
+
+  # ===================
+  # Install Tasks
+  # ===================
+  install-azwi:
+    desc: Install the azwi CLI tool
+    cmds:
+      - |
+        echo "Installing azwi CLI..."
+        TMPDIR=$(mktemp -d)
+        pushd "$TMPDIR"
+        AZWI_VERSION=$(curl -sL "https://api.github.com/repos/Azure/azure-workload-identity/releases/latest" | jq -r '.tag_name')
+        echo "Latest version: ${AZWI_VERSION}"
+        curl -sLO "https://github.com/Azure/azure-workload-identity/releases/download/${AZWI_VERSION}/azwi-${AZWI_VERSION}-linux-amd64.tar.gz"
+        tar -xzf "azwi-${AZWI_VERSION}-linux-amd64.tar.gz"
+        sudo mv azwi /usr/local/bin/
+        popd
+        rm -rf "$TMPDIR"
+        echo "azwi installed successfully"
+        azwi version
+
+  uninstall-azwi:
+    desc: Uninstall the azwi CLI tool
+    cmds:
+      - |
+        echo "Uninstalling azwi CLI..."
+        sudo rm -f /usr/local/bin/azwi
+        echo "azwi uninstalled successfully"
+
+  azwi-completion:
+    desc: Add azwi bash completion to ~/.bashrc.d/
+    cmds:
+      - |
+        mkdir -p ~/.bashrc.d
+        echo 'source <(azwi completion bash)' > ~/.bashrc.d/azwi-completion.sh
+        echo "Created ~/.bashrc.d/azwi-completion.sh"
+        echo "Restart your shell or run: source ~/.bashrc.d/azwi-completion.sh"
+
+  # ===================
+  # OIDC Discovery Document Tasks
+  # ===================
+  oidc-create-storage-account:
+    desc: Create Azure resource group and storage account for OIDC issuer
+    cmds:
+      - az group create --name "{{.RESOURCE_GROUP}}" --location "{{.LOCATION}}"
+      - |
+        export AZURE_STORAGE_ACCOUNT="oidcissuer$(openssl rand -hex 4)"
+        echo "Created storage account: ${AZURE_STORAGE_ACCOUNT}"
+        az storage account create --resource-group "{{.RESOURCE_GROUP}}" --name "${AZURE_STORAGE_ACCOUNT}"
+        az storage container create --name '{{.AZURE_STORAGE_CONTAINER}}'
+        echo "AZURE_STORAGE_ACCOUNT=${AZURE_STORAGE_ACCOUNT}" > .oidc-env
+
+  oidc-enable-static-website:
+    desc: Enable static website hosting on the storage account
+    cmds:
+      - |
+        echo "Enabling static website hosting on {{.AZURE_STORAGE_ACCOUNT}}..."
+        az storage blob service-properties update \
+          --account-name "{{.AZURE_STORAGE_ACCOUNT}}" \
+          --static-website \
+          --index-document index.html
+        echo "Static website enabled."
+        echo "Your OIDC issuer URL will be: {{.ISSUER_URL}}"
+
+  oidc-generate-discovery-document:
+    desc: Generate the OIDC discovery document (openid-configuration.json)
+    cmds:
+      - |
+        if [ -z "{{.AZURE_STORAGE_ACCOUNT}}" ]; then
+          echo "Error: AZURE_STORAGE_ACCOUNT is required. Set it with: task oidc-generate-discovery-document AZURE_STORAGE_ACCOUNT=<your-account>"
+          exit 1
+        fi
+        cat <<EOF > openid-configuration.json
+        {
+          "issuer": "{{.ISSUER_URL}}/",
+          "jwks_uri": "{{.ISSUER_URL}}/openid/v1/jwks",
+          "response_types_supported": [
+            "id_token"
+          ],
+          "subject_types_supported": [
+            "public"
+          ],
+          "id_token_signing_alg_values_supported": [
+            "RS256"
+          ]
+        }
+        EOF
+        echo "Generated openid-configuration.json with issuer: {{.ISSUER_URL}}"
+    generates:
+      - openid-configuration.json
+
+  oidc-upload-discovery-document:
+    desc: Upload the discovery document to Azure blob storage
+    cmds:
+      - |
+        if [ -z "{{.AZURE_STORAGE_ACCOUNT}}" ]; then
+          echo "Error: AZURE_STORAGE_ACCOUNT is required"
+          exit 1
+        fi
+        az storage blob upload \
+          --account-name "{{.AZURE_STORAGE_ACCOUNT}}" \
+          --container-name '{{.AZURE_STORAGE_CONTAINER}}' \
+          --file openid-configuration.json \
+          --name .well-known/openid-configuration \
+          --overwrite
+
+  oidc-verify-discovery-document:
+    desc: Verify the discovery document is publicly accessible
+    cmds:
+      - |
+        echo "Fetching: {{.ISSUER_URL}}/.well-known/openid-configuration"
+        curl -s "{{.ISSUER_URL}}/.well-known/openid-configuration" | jq .
+
+  # ===================
+  # JWKS Tasks
+  # ===================
+  jwks-generate:
+    desc: Generate the JWKS document from public signing key (requires azwi)
+    cmds:
+      - |
+        if [ ! -f "{{.PUBLIC_KEY_PATH}}" ]; then
+          echo "Error: Public key file not found at {{.PUBLIC_KEY_PATH}}"
+          echo "Set PUBLIC_KEY_PATH variable or ensure the file exists"
+          exit 1
+        fi
+        azwi jwks --public-keys "{{.PUBLIC_KEY_PATH}}" --output-file jwks.json
+        echo "Generated jwks.json"
+    generates:
+      - jwks.json
+
+  jwks-upload:
+    desc: Upload the JWKS document to Azure blob storage
+    cmds:
+      - |
+        if [ -z "{{.AZURE_STORAGE_ACCOUNT}}" ]; then
+          echo "Error: AZURE_STORAGE_ACCOUNT is required"
+          exit 1
+        fi
+        az storage blob upload \
+          --account-name "{{.AZURE_STORAGE_ACCOUNT}}" \
+          --container-name '{{.AZURE_STORAGE_CONTAINER}}' \
+          --file jwks.json \
+          --name openid/v1/jwks \
+          --overwrite
+
+  jwks-verify:
+    desc: Verify the JWKS document is publicly accessible
+    cmds:
+      - |
+        echo "Fetching: {{.ISSUER_URL}}/openid/v1/jwks"
+        curl -s "{{.ISSUER_URL}}/openid/v1/jwks" | jq .
+
+  # ===================
+  # Authentication Tasks
+  # ===================
+  auth-update-issuer:
+    desc: Update the cluster authentication to use the new service account issuer URL
+    cmds:
+      - |
+        if [ -z "{{.AZURE_STORAGE_ACCOUNT}}" ]; then
+          echo "Error: AZURE_STORAGE_ACCOUNT is required"
+          exit 1
+        fi
+        SERVICE_ACCOUNT_ISSUER="{{.ISSUER_URL}}/"
+        echo "Updating authentication to use issuer: ${SERVICE_ACCOUNT_ISSUER}"
+        oc patch authentication cluster --type=merge -p "{\"spec\":{\"serviceAccountIssuer\":\"${SERVICE_ACCOUNT_ISSUER}\"}}"
+        echo "Authentication updated. This will trigger a rolling restart of the API servers."
+        echo "Monitor progress with: oc get clusteroperators kube-apiserver"
+
+  auth-get-issuer:
+    desc: Get the current service account issuer URL from the cluster
+    cmds:
+      - |
+        echo "Current service account issuer:"
+        oc get authentication cluster -o jsonpath='{.spec.serviceAccountIssuer}'
+        echo ""
+
+  auth-restore:
+    desc: Restore the authentication resource from backup
+    cmds:
+      - |
+        if [ ! -f "backup-authentication.yaml" ]; then
+          echo "Error: backup-authentication.yaml not found"
+          echo "Run 'task backup-authentication' first to create a backup"
+          exit 1
+        fi
+        echo "Restoring authentication from backup-authentication.yaml..."
+        oc apply -f backup-authentication.yaml
+        echo "Authentication restored. This will trigger a rolling restart of the API servers."
+        echo "Monitor progress with: oc get clusteroperators kube-apiserver"
+
+  # ===================
+  # Webhook Deployment Tasks
+  # ===================
+  webhook-create-namespace:
+    desc: Create the azure-workload-identity-system namespace
+    cmds:
+      - |
+        echo "Creating namespace azure-workload-identity-system..."
+        oc new-project azure-workload-identity-system || oc project azure-workload-identity-system
+        echo "Namespace created/selected"
+
+  webhook-create-helm-repo:
+    desc: Create ProjectHelmChartRepository resource for azure-workload-identity
+    cmds:
+      - |
+        echo "Creating ProjectHelmChartRepository resource..."
+        cat <<EOF | oc apply -f -
+        apiVersion: helm.openshift.io/v1beta1
+        kind: ProjectHelmChartRepository
+        metadata:
+          name: azure-workload-identity
+          namespace: azure-workload-identity-system
+        spec:
+          connectionConfig:
+            url: https://azure.github.io/azure-workload-identity/charts
+          name: azure-workload-identity
+        EOF
+        echo "ProjectHelmChartRepository created"
+
+  webhook-install-helm:
+    desc: Install workload-identity-webhook using helm CLI
+    cmds:
+      - |
+        echo "Getting Azure tenant ID..."
+        AZURE_TENANT_ID=$(az account show --query tenantId -o tsv)
+        if [ -z "${AZURE_TENANT_ID}" ]; then
+          echo "Error: Could not get AZURE_TENANT_ID from az cli"
+          echo "Make sure you are logged in with: az login"
+          exit 1
+        fi
+        echo "Using tenant ID: ${AZURE_TENANT_ID}"
+        echo "Adding helm repo..."
+        helm repo add azure-workload-identity https://azure.github.io/azure-workload-identity/charts
+        helm repo update
+        echo "Installing workload-identity-webhook..."
+        helm install workload-identity-webhook azure-workload-identity/workload-identity-webhook \
+          --namespace azure-workload-identity-system \
+          --create-namespace \
+          --set azureTenantID="${AZURE_TENANT_ID}"
+        echo "Webhook installed"
+
+  webhook-fix-scc:
+    desc: Grant nonroot-v2 SCC to webhook service account (required for OpenShift)
+    cmds:
+      - |
+        echo "Granting nonroot-v2 SCC to azure-wi-webhook-admin service account..."
+        oc adm policy add-scc-to-user nonroot-v2 -z azure-wi-webhook-admin -n azure-workload-identity-system
+        echo "SCC granted. Restarting deployment..."
+        oc rollout restart deployment azure-wi-webhook-controller-manager -n azure-workload-identity-system
+        echo "Waiting for pods to be ready..."
+        oc rollout status deployment azure-wi-webhook-controller-manager -n azure-workload-identity-system --timeout=120s
+        echo "Webhook pods should now be running"
+
+  webhook-deploy-all:
+    desc: Deploy webhook (namespace, ProjectHelmChartRepository, helm install, fix SCC)
+    cmds:
+      - task: webhook-create-namespace
+      - task: webhook-create-helm-repo
+      - task: webhook-install-helm
+      - task: webhook-fix-scc
+
+  # ===================
+  # Default
+  # ===================
+  default:
+    desc: List all available tasks and show workflow instructions
+    cmds:
+      - echo -e "\n\033[1;36m════════════════════════════════════════════════════════════════\033[0m"
+      - echo -e "\033[1;36m  Azure Workload Identity Setup for On-Prem OpenShift\033[0m"
+      - echo -e "\033[1;36m════════════════════════════════════════════════════════════════\033[0m\n"
+      - echo -e "\033[1;35m📖 ABOUT:\033[0m"
+      - echo -e "   This guide configures Azure Workload Identity with on-prem OpenShift"
+      - echo -e "   to improve your cluster's security posture by eliminating hard-coded"
+      - echo -e "   service principal credentials.\n"
+      - echo -e "\033[1;35m🔗 DOCUMENTATION:\033[0m"
+      - echo -e "   https://azure.github.io/azure-workload-identity/docs/introduction.html\n"
+      - echo -e "\033[1;33m📋 WORKFLOW STEPS:\033[0m\n"
+      - echo -e "\033[1;32m1. Backup existing resources:\033[0m"
+      - echo -e "   task backup-all"
+      - echo -e "   task backup-extract-keys\n"
+      - echo -e "\033[1;32m2. Install azwi CLI (if needed):\033[0m"
+      - echo -e "   task install-azwi"
+      - echo -e "   task azwi-completion\n"
+      - echo -e "\033[1;32m3. Setup Azure OIDC storage:\033[0m"
+      - echo -e "   task oidc-create-storage-account"
+      - echo -e "   task oidc-enable-static-website"
+      - echo -e "   task oidc-generate-discovery-document"
+      - echo -e "   task oidc-upload-discovery-document"
+      - echo -e "   task oidc-verify-discovery-document\n"
+      - echo -e "\033[1;32m4. Generate and upload JWKS:\033[0m"
+      - echo -e "   task jwks-generate"
+      - echo -e "   task jwks-upload"
+      - echo -e "   task jwks-verify\n"
+      - echo -e "\033[1;32m5. Update cluster authentication:\033[0m"
+      - echo -e "   task auth-get-issuer"
+      - echo -e "   task auth-update-issuer\n"
+      - echo -e "\033[1;32m6. Deploy workload identity webhook:\033[0m"
+      - echo -e "   task webhook-create-namespace"
+      - echo -e "   task webhook-create-helm-repo"
+      - echo -e "   task webhook-install-helm"
+      - echo -e "   task webhook-fix-scc"
+      - 'echo -e "   or run: task webhook-deploy-all\n"'
+      - echo -e "\033[1;31m7. Rollback (if needed):\033[0m"
+      - echo -e "   task auth-restore\n"
+      - echo -e "\033[1;36m════════════════════════════════════════════════════════════════\033[0m"
+      - echo -e "\033[1;36m  Available Tasks\033[0m"
+      - echo -e "\033[1;36m════════════════════════════════════════════════════════════════\033[0m\n"
+      - task --list-all
