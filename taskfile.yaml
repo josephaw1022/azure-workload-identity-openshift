@@ -367,9 +367,28 @@ tasks:
       - echo -e "   task webhook-install-helm"
       - echo -e "   task webhook-fix-scc"
       - 'echo -e "   or run: task webhook-deploy-all\n"'
-      - echo -e "\033[1;31m7. Rollback (if needed):\033[0m"
+      - echo -e "\033[1;32m7. Run PoC test:\033[0m"
+      - echo -e "   task poc-test\n"
+      - echo -e "\033[1;31m8. Rollback (if needed):\033[0m"
       - echo -e "   task auth-restore\n"
       - echo -e "\033[1;36m════════════════════════════════════════════════════════════════\033[0m"
       - echo -e "\033[1;36m  Available Tasks\033[0m"
       - echo -e "\033[1;36m════════════════════════════════════════════════════════════════\033[0m\n"
       - task --list-all
+
+  # ===================
+  # PoC Test
+  # ===================
+  poc-test:
+    desc: Run the PoC test script to validate workload identity setup
+    cmds:
+      - chmod +x poc-test.sh && ./poc-test.sh
+
+  poc-cleanup:
+    desc: Clean up PoC test resources (OpenShift project and Azure resource group)
+    cmds:
+      - echo "Deleting OpenShift project wi-poc-test..."
+      - oc delete project wi-poc-test --ignore-not-found
+      - echo "Deleting Azure resource group wi-poc-rg..."
+      - az group delete --name wi-poc-rg --yes --no-wait
+      - echo "Cleanup initiated. Azure resource group deletion runs in background."

@@ -109,6 +109,53 @@ If something goes wrong, restore from backup:
 task auth-restore    # Restore authentication from backup
 ```
 
+## Validating the Setup with a PoC
+
+After completing the setup, run a quick proof-of-concept test to verify everything is working:
+
+```bash
+task poc-test
+```
+
+This script validates the entire workload identity flow by:
+
+1. **Creating an OpenShift project** (`wi-poc-test`) with a service account
+2. **Creating Azure resources**:
+   - A resource group (`wi-poc-rg`)
+   - A user-assigned managed identity (`wi-poc-identity`)
+   - A federated identity credential linking your cluster's service account to the managed identity
+3. **Deploying a test pod** with the required labels and annotations
+4. **Verifying webhook mutation** - checking that the Azure Workload Identity webhook injected the correct environment variables and token volume
+
+### How It Works
+
+The webhook watches for pods with the label `azure.workload.identity/use: "true"`. When it finds one, it:
+
+1. Reads the `azure.workload.identity/client-id` annotation from the pod's service account
+2. Injects these environment variables into all containers:
+   - `AZURE_CLIENT_ID` - The managed identity client ID
+   - `AZURE_TENANT_ID` - Your Azure AD tenant ID  
+   - `AZURE_FEDERATED_TOKEN_FILE` - Path to the projected token
+   - `AZURE_AUTHORITY_HOST` - Azure AD authority URL
+3. Mounts a projected service account token at `/var/run/secrets/azure/tokens/azure-identity-token`
+
+### Expected Output
+
+If successful, you'll see the injected environment variables:
+
+![Environment variables injected by the webhook](assets/poc-env-vars-injected.png)
+
+And the mounted token file:
+
+![Token file mounted in the pod](assets/poc-token-mounted.png)
+
+### Cleanup
+
+```bash
+oc delete project wi-poc-test
+az group delete --name wi-poc-rg --yes --no-wait
+```
+
 ## Configuration
 
 Edit `taskfile.yaml` to customize these variables:
