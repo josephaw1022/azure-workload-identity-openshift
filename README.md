@@ -209,6 +209,7 @@ spec:
 ## Documentation
 
 - [Azure Workload Identity Introduction](https://azure.github.io/azure-workload-identity/docs/introduction.html)
+- [Workload Identity Overview (Microsoft Learn)](https://learn.microsoft.com/en-us/azure/aks/workload-identity-overview?tabs=dotnet)
 - [Self-Managed Clusters Setup](https://azure.github.io/azure-workload-identity/docs/installation/self-managed-clusters.html)
 - [OIDC Issuer Discovery Document](https://azure.github.io/azure-workload-identity/docs/installation/self-managed-clusters/oidc-issuer/discovery-document.html)
 - [JWKS Setup](https://azure.github.io/azure-workload-identity/docs/installation/self-managed-clusters/oidc-issuer/jwks.html)
