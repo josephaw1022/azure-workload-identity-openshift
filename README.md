@@ -212,6 +212,10 @@ oc get externalsecret datadog-credentials -n datadog
 oc get secret datadog-credentials -n datadog
 ```
 
+If successful, you'll see the ExternalSecret synced and the Kubernetes secret created:
+
+![ExternalSecret synced from Azure Key Vault](assets/eso-secret-synced.png)
+
 ### Cleanup
 
 ```bash
