@@ -212,7 +212,11 @@ oc get externalsecret datadog-credentials -n datadog
 oc get secret datadog-credentials -n datadog
 ```
 
-If successful, you'll see the ExternalSecret synced and the Kubernetes secret created:
+If successful, you'll see the ClusterSecretStore ready:
+
+![ClusterSecretStore ready and valid](assets/eso-clustersecretstore-ready.png)
+
+And the ExternalSecret synced with the Kubernetes secret created:
 
 ![ExternalSecret synced from Azure Key Vault](assets/eso-secret-synced.png)
 
