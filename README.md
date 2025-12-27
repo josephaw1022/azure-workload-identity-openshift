@@ -183,7 +183,7 @@ The `keyvault-eso-test` task:
    - `ClusterSecretStore` configured for Azure Key Vault with WorkloadIdentity auth
    - `ExternalSecret` in the `datadog` namespace that pulls secrets from Key Vault
 
-### Prerequisites
+### ESO Prerequisites
 
 - External Secrets Operator installed in your cluster
 - Azure Key Vault with the secrets you want to sync (e.g., `datadog-api-key`, `datadog-app-key`)
