@@ -156,6 +156,76 @@ oc delete project wi-poc-test
 az group delete --name wi-poc-rg --yes --no-wait
 ```
 
+## Key Vault + External Secrets Operator Integration
+
+After validating the basic workload identity setup, you can integrate with External Secrets Operator to pull secrets from Azure Key Vault:
+
+```bash
+task keyvault-eso-test      # Setup workload identity + ESO integration
+task keyvault-eso-verify    # Verify the setup is working
+task keyvault-eso-cleanup   # Clean up all resources
+```
+
+### What It Does
+
+The `keyvault-eso-test` task:
+
+1. **Creates Azure resources**:
+   - Resource group (`external-secrets-rg`)
+   - User-assigned managed identity (`external-secrets-identity`)
+   - Grants "Key Vault Secrets User" role to the identity
+
+2. **Creates OpenShift resources**:
+   - Service account with workload identity annotations in `external-secrets` namespace
+   - Federated identity credential linking the service account to Azure
+
+3. **Creates External Secrets resources**:
+   - `ClusterSecretStore` configured for Azure Key Vault with WorkloadIdentity auth
+   - `ExternalSecret` in the `datadog` namespace that pulls secrets from Key Vault
+
+### Prerequisites
+
+- External Secrets Operator installed in your cluster
+- Azure Key Vault with the secrets you want to sync (e.g., `datadog-api-key`, `datadog-app-key`)
+- Key Vault configured for RBAC (not Access Policies)
+
+### Configuration
+
+Update the variables in `keyvault-poc-test.sh`:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `KEYVAULT_NAME` | Your Azure Key Vault name | `kubesoar-homelab-67029` |
+| `RESOURCE_GROUP` | Azure resource group for identity | `external-secrets-rg` |
+| `NAMESPACE` | Namespace for service account | `external-secrets` |
+| `ISSUER_URL` | Your OIDC issuer URL (with trailing slash) | - |
+
+### Verifying the Setup
+
+```bash
+# Check all components
+task keyvault-eso-verify
+
+# Or manually check:
+oc get clustersecretstore azure-keyvault-store
+oc get externalsecret datadog-credentials -n datadog
+oc get secret datadog-credentials -n datadog
+```
+
+### Cleanup
+
+```bash
+task keyvault-eso-cleanup
+```
+
+This removes:
+- ExternalSecret from the datadog namespace
+- ClusterSecretStore
+- Service account from external-secrets namespace
+- Federated identity credential from Azure
+- Managed identity from Azure
+- Azure resource group
+
 ## Configuration
 
 Edit `taskfile.yaml` to customize these variables:
